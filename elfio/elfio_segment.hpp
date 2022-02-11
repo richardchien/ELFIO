@@ -60,11 +60,14 @@ class segment
     ELFIO_SET_ACCESS_DECL( Elf64_Off, offset );
     ELFIO_SET_ACCESS_DECL( Elf_Half, index );
 
-    virtual const std::vector<Elf_Half>& get_sections() const               = 0;
-    virtual void load( std::istream& stream, std::streampos header_offset ) = 0;
+    virtual const std::vector<Elf_Half>& get_sections() const = 0;
+
+    virtual void load( std::istream&  stream,
+                       std::streampos header_offset,
+                       bool           is_lazy = false )       = 0;
     virtual void save( std::ostream&  stream,
                        std::streampos header_offset,
-                       std::streampos data_offset )                         = 0;
+                       std::streampos data_offset ) = 0;
 };
 
 //------------------------------------------------------------------------------
@@ -72,10 +75,11 @@ template <class T> class segment_impl : public segment
 {
   public:
     //------------------------------------------------------------------------------
-    segment_impl( const endianess_convertor* convertor,
-                  const address_translator*  translator )
-        : index( 0 ), data( nullptr ), convertor( convertor ),
-          translator( translator ), stream_size( 0 ), is_offset_set( false )
+    segment_impl( const endianess_convertor* convertor_,
+                  const address_translator*  translator_ )
+        : pstream( nullptr ), index( 0 ), data( nullptr ),
+          convertor( convertor_ ), translator( translator_ ), stream_size( 0 ),
+          is_offset_set( false ), is_lazy( false )
     {
         std::fill_n( reinterpret_cast<char*>( &ph ), sizeof( ph ), '\0' );
     }
@@ -98,7 +102,14 @@ template <class T> class segment_impl : public segment
     Elf_Half get_index() const override { return index; }
 
     //------------------------------------------------------------------------------
-    const char* get_data() const override { return data; }
+    const char* get_data() const override
+    {
+        if ( is_lazy ) {
+            load_data();
+            is_lazy = false;
+        }
+        return data;
+    }
 
     //------------------------------------------------------------------------------
     Elf_Half add_section_index( Elf_Half  sec_index,
@@ -159,8 +170,13 @@ template <class T> class segment_impl : public segment
     void set_index( Elf_Half value ) override { index = value; }
 
     //------------------------------------------------------------------------------
-    void load( std::istream& stream, std::streampos header_offset ) override
+    void load( std::istream&  stream,
+               std::streampos header_offset,
+               bool           is_lazy_ = false ) override
     {
+        pstream = &stream;
+        is_lazy = is_lazy_;
+
         if ( translator->empty() ) {
             stream.seekg( 0, stream.end );
             set_stream_size( size_t( stream.tellg() ) );
@@ -173,18 +189,25 @@ template <class T> class segment_impl : public segment
         stream.read( reinterpret_cast<char*>( &ph ), sizeof( ph ) );
         is_offset_set = true;
 
+        if ( !is_lazy ) {
+            load_data();
+        }
+    }
+
+    void load_data() const
+    {
         if ( PT_NULL != get_type() && 0 != get_file_size() ) {
-            stream.seekg( ( *translator )[( *convertor )( ph.p_offset )] );
+            pstream->seekg( ( *translator )[( *convertor )( ph.p_offset )] );
             Elf_Xword size = get_file_size();
 
-            if ( size > get_stream_size() ) {
+            if ( size > get_stream_size() || is_lazy ) {
                 data = nullptr;
             }
             else {
                 data = new ( std::nothrow ) char[(size_t)size + 1];
 
                 if ( nullptr != data ) {
-                    stream.read( data, size );
+                    pstream->read( data, size );
                     data[size] = 0;
                 }
             }
@@ -210,14 +233,16 @@ template <class T> class segment_impl : public segment
 
     //------------------------------------------------------------------------------
   private:
+    mutable std::istream*      pstream;
     T                          ph;
     Elf_Half                   index;
-    char*                      data;
+    mutable char*              data;
     std::vector<Elf_Half>      sections;
     const endianess_convertor* convertor;
     const address_translator*  translator;
     size_t                     stream_size;
     bool                       is_offset_set;
+    mutable bool               is_lazy;
 };
 
 } // namespace ELFIO
